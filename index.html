@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Моніторинг URL з Таймаутом</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f9f9f9; }
+        .controls { margin-bottom: 20px; display: flex; gap: 15px; align-items: center; background: #fff; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 6px 20px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold; }
+        #startBtn { background-color: #4CAF50; color: white; }
+        #startBtn:disabled { background-color: #cccccc; }
+        #stopBtn { background-color: #f44336; color: white; }
+        #stopBtn:disabled { background-color: #cccccc; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #fff; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .success { color: #2e7d32; font-weight: bold; }
+        .error { color: #c62828; font-weight: bold; }
+        .timeout { color: #ef6c00; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>Моніторинг доступності URL</h2>
+
+    <div class="controls">
+        <label>URL: <input type="url" id="urlInput" value="https://typicode.com" style="width: 350px;"></label>
+        <label>Інтервал (сек): <input type="number" id="intervalInput" value="5" min="1" style="width: 60px;"></label>
+        <button id="startBtn">Старт</button>
+        <button id="stopBtn" disabled>Стоп</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Дата та час початку</th>
+                <th>Результат спроби</th>
+            </tr>
+        </thead>
+        <tbody id="logTable"></tbody>
+    </table>
+
+    <script>
+        let timerId = null;
+        let activeControllers = new Set(); // Для відстеження активних запитів
+
+        const urlInput = document.getElementById('urlInput');
+        const intervalInput = document.getElementById('intervalInput');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const logTable = document.getElementById('logTable');
+
+        startBtn.addEventListener('click', () => {
+            const url = urlInput.value.trim();
+            const intervalSec = parseInt(intervalInput.value, 10);
+
+            if (!url) {
+                alert('Будь ласка, введіть URL');
+                return;
+            }
+
+            if (isNaN(intervalSec) || intervalSec <= 0) {
+                alert('Введіть коректний інтервал у секундах');
+                return;
+            }
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            urlInput.disabled = true;
+            intervalInput.disabled = true;
+
+            const intervalMs = intervalSec * 1000;
+
+            // Перший запуск виконується миттєво
+            checkUrl(url, intervalMs);
+            // Наступні запуски за таймером
+            timerId = setInterval(() => checkUrl(url, intervalMs), intervalMs);
+        });
+
+        stopBtn.addEventListener('click', () => {
+            clearInterval(timerId);
+            timerId = null;
+
+            // Скасовуємо всі запити, які ще виконуються на момент зупинки
+            activeControllers.forEach(controller => controller.abort());
+            activeControllers.clear();
+
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            urlInput.disabled = false;
+            intervalInput.disabled = false;
+        });
+
+        async function checkUrl(url, timeoutMs) {
+            const startTime = new Date();
+            const timestampStr = startTime.toLocaleString('uk-UA');
+
+            // Створення нового рядка у таблиці (додається вгору списку)
+            const row = document.createElement('tr');
+            const timeCell = document.createElement('td');
+            timeCell.textContent = timestampStr;
+            const resultCell = document.createElement('td');
+            resultCell.textContent = 'Очікування відповіді...';
+            
+            row.appendChild(timeCell);
+            row.appendChild(resultCell);
+            logTable.insertBefore(row, logTable.firstChild);
+
+            // Контролер для скасування запиту за таймаутом
+            const controller = new AbortController();
+            activeControllers.add(controller);
+
+            const startMs = performance.now();
+
+            // Таймер, який скасує запит, якщо він перевищить інтервал
+            const timeoutId = setTimeout(() => {
+                controller.abort('timeout');
+            }, timeoutMs);
+
+            try {
+                const response = await fetch(url, { 
+                    method: 'GET', 
+                    cache: 'no-store',
+                    signal: controller.signal 
+                });
+
+                clearTimeout(timeoutId); // Запит встиг, скасовуємо таймер таймауту
+                activeControllers.delete(controller);
+
+                const durationMs = Math.round(performance.now() - startMs);
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const bytes = blob.size;
+                    resultCell.className = 'success';
+                    resultCell.textContent = `Успішно: завантажено ${bytes} байт за ${durationMs} мс`;
+                } else {
+                    resultCell.className = 'error';
+                    resultCell.textContent = `Помилка: Код статусу HTTP ${response.status}`;
+                }
+
+            } catch (error) {
+                clearTimeout(timeoutId);
+                activeControllers.delete(controller);
+
+                // Перевіряємо, чи помилка викликана таймаутом
+                if (error.name === 'AbortError' && controller.signal.reason === 'timeout') {
+                    resultCell.className = 'timeout';
+                    resultCell.textContent = 'timeout (перевищено інтервал очікування)';
+                } else if (error.name === 'AbortError') {
+                    resultCell.className = 'error';
+                    resultCell.textContent = 'Скасовано користувачем';
+                } else {
+                    resultCell.className = 'error';
+                    resultCell.textContent = `Помилка мережі / CORS. Код: ${error.name}`;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
